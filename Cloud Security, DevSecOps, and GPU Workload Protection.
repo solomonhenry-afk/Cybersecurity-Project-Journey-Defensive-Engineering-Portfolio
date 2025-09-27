@@ -1,0 +1,317 @@
+I documented this project blueprint to walk my audience through it step-by-step. No assumptions: what to install, where to run things, why they matter, and a short story of how the pieces work together in a real company. I’ll also make it crystal clear **who** (DevOps, SecOps, developer) should run each piece and **how** each gives enterprise value.
+
+They’re DevSecOps + SecOps tools — a hybrid.
+
+* **DevSecOps**: `python-compliance-automation` and the k8s manifest checks are aimed at pipelines and infra-as-code (DevOps teams with security responsibilities).
+* **SecOps / SOC**: `siem-log-analysis-toolkit` and `pdf-malware-defense` are primarily for SOC analysts and endpoint/email security teams.
+* **The GPU lab** sits at the intersection: infra/dev teams will build/run it; security engineers design the hardening and mitigation controls.
+
+---
+
+# What to download first (ABC — minimal, safe list)
+
+Install these on your workstation or lab VM:
+
+A. Basic tools
+
+* **Git** (to clone repos)
+* **Python 3.10+** and `pip`
+* **VS Code** (or any editor)
+
+B. Containers & Kubernetes
+
+* **Docker Desktop** (Windows/Mac) or Docker Engine on Linux
+* **kubectl** (Kubernetes CLI)
+* **minikube** or **kind** (local K8s cluster for lab) — use minikube if you want a simple UI
+* (Optional for real GPUs) **NVIDIA drivers** + **NVIDIA Container Toolkit** / `nvidia-docker2`
+
+C. Cloud & SIEM tools
+
+* **AWS CLI** + credentials (for cloud checks)
+* **Splunk** (free trial or Splunk Light / Splunk Dev environment) or ELK (Elastic) if preferred
+
+D. Misc
+
+* `pip install` these Python libs: `PyPDF2`, `pynvml` (for GPU), `boto3` (AWS), `requests`, `pyyaml`
+
+---
+
+# This is the step-by-step, project by project — with exact commands & where to run
+
+---
+
+## 1) GPU Cloud Security Lab — "simulate and harden GPU workloads"
+
+**Who runs it:** SecEng / infra engineers, DevOps
+**Where to run:** local lab (minikube/kind) *or* cloud GPU instance (AWS EC2 GPU) for full CUDA checks
+
+### Why it matters
+
+It demonstrates how GPU workloads can be isolated so tenants don’t escape or leak data — very important for platforms like Runpod.
+
+### Setup (ABC)
+
+A. If you have no GPU hardware (local dev only):
+
+1. Install Docker, kubectl, and minikube.
+2. Create a minikube cluster:
+
+   ```
+   minikube start --driver=docker
+   kubectl get nodes
+   ```
+3. Deploy namespace & K8s manifests:
+
+   ```
+   git clone <your-github>/gpu-cloud-security-lab
+   cd gpu-cloud-security-lab/k8s
+   kubectl apply -f namespace-isolation.yaml
+   kubectl apply -f gpu-workload-deployment.yaml
+   ```
+
+   *Note:* This workload will run even without a GPU (it won't access GPU), but you can still test seccomp/AppArmor and network policies.
+
+B. If you have access to a GPU node (recommended for CUDA checks):
+
+1. Spin up a GPU VM in the cloud (AWS g4dn/g5, GCP A2), install NVIDIA drivers and Docker + NVIDIA Container Toolkit.
+2. Deploy a k8s cluster or EKS nodegroup with GPU nodes; then apply the same manifests.
+3. Run the CUDA inspector:
+
+   ```
+   pip install nvidia-ml-py3
+   python3 cuda-research/cuda-memory-check.py
+   ```
+
+   This tells you GPU presence and memory usage — a first step for monitoring isolation.
+
+### How to make it production-useful
+
+* Add `tools/k8s_hardening_check.py` into GitHub Actions to run on PRs that change K8s YAML — prevents risky configs from reaching production.
+* Run a **DaemonSet** or CronJob that periodically runs CUDA checks and pushes metrics to Prometheus → alert on anomalies.
+
+---
+
+## 2) Python Compliance Automation — "automate audit evidence & checks"
+
+**Who runs it:** DevSecOps, Cloud Security Engineer
+**Where to run:** CI (GitHub Actions) or as scheduled job (nightly) in a secure environment
+
+### Why it matters
+
+Since Auditors want repeatable evidence. Automating IAM & S3 checks and producing JSON reports saves hours during audits (SOC 2 / ISO 27001).
+
+### Setup (ABC)
+
+1. Install Python requirements:
+
+   ```
+   git clone <your>/python-compliance-automation
+   cd python-compliance-automation
+   pip install -r requirements.txt
+   ```
+2. I Configure AWS credentials (use a read-only auditor role/keys stored in CI secrets).
+3. Run locally for a quick proof:
+
+   ```
+   python3 run_checks.py --out reports/report.json
+   ```
+
+   Output: `reports/report.json` — a timestamped file you can present to auditors.
+
+### CI integration (example)
+
+* I Add a GitHub Action that runs nightly and uploads the report to an S3 bucket or stores it as a build artifact. On finding an over-privileged IAM user, the pipeline can open a Jira ticket automatically.
+
+---
+
+## 3) PDF Malware Defense — "detect malicious PDFs before users open them"
+
+**Who runs it:** SOC analysts, Endpoint/Email security team
+**Where to run:** workstation/service that handles inbound attachments (mail gateway) or endpoint watchers for high-risk teams
+
+### Why it matters
+
+Malicious PDFs are a common initial access vector. Automating detection prevents user interaction with malicious content.
+
+### Setup (ABC)
+
+1. Install code:
+
+   ```
+   git clone <your>/pdf-malware-defense
+   cd pdf-malware-defense
+   pip install -r requirements.txt
+   ```
+2. Single-file scan (test):
+
+   ```
+   python3 scanner/pdf_analyze.py examples/sample.pdf
+   ```
+
+   Example output:
+
+   ```json
+   {
+     "has_javascript": true,
+     "has_openaction": false,
+     "embedded_files": ["payload.exe"]
+   }
+   ```
+3. Monitor mode (run as a background service):
+
+   * Option 1: Systemd unit (Linux) that runs `pdf_monitor.py` on startup and scans `/home/you/Downloads`.
+   * Option 2: Integrate into mail server: pipe attachments to `pdf_analyze.py` and drop or quarantine if suspicious.
+
+### Production integration
+
+* Use Splunk/ELK to receive the JSON events produced by the scanner (HTTP Event Collector / syslog). SOC gets an alert and full file metadata for triage.
+
+---
+
+## 4) SIEM Log Analysis Toolkit — "turn logs into precise detections"
+
+**Who runs it:** SOC analysts, threat hunters
+**Where to run:** local testing, ingestion pipelines (Logstash/Fluentd), or inside Splunk/ELK
+
+### Why this matters
+
+Raw logs are noisy. Good parsers + detection templates reduce false positives and speed up triage.
+
+### Setup (ABC)
+
+1. Pull the repo:
+
+   ```
+   git clone <your>/siem-log-analysis-toolkit
+   cd siem-log-analysis-toolkit
+   ```
+2. Parse sample logs locally:
+
+   ```
+   python3 parsers/ssh_parser.py tests/sample_logs/auth.log > parsed.json
+   ```
+
+   Parsed events are JSON-ready for SIEM ingestion.
+3. Import detection templates:
+
+   * In Splunk, create correlation searches using `detections/suspicious_kerberos.json` as a starting point.
+   * Tune thresholds and add whitelists.
+
+### How SOC uses it
+
+* Parsers run as pre-processing on ingest to normalize fields (username, source IP, geo).
+* Detection templates fire alerts that map to MITRE ATT&CK techniques, making incident classification consistent.
+
+---
+
+# Enterprise Day-to-Day Storytelling: “A Day in the Life” — how the pieces work together
+
+Imagine you’re a Jr. SOC Analyst at **CloudAI Inc.** — they run GPU cloud workloads and care about compliance.
+
+**Morning (08:15)**
+
+* You open Splunk. Overnight the `pdf-malware-defense` scanned 20 inbound PDFs; 2 flagged `has_javascript=true`. You see the JSON alert in Splunk with file names and source email. You quarantine the emails and start triage.
+
+**09:00 — Triage**
+
+* You use `pdf_analyze.py` locally to re-scan the quarantined files and confirm malicious indicators. You attach the JSON report to a Jira ticket and notify the Incident Response owner. The PDF scanner logged everything to SIEM, so the threat hunter traces similar attachments across the corp.
+
+**10:30 — IaC PR review**
+
+* A DevOps PR modified a Kubernetes manifest. The repo runs `k8s_hardening_check.py` in GitHub Actions. The pipeline failed the PR because `hostNetwork: true` was added. You (or the infra engineer) comment on the PR and request changes — this prevented a potential host-level exposure.
+
+**14:00 — GPU cluster monitoring**
+
+* The GPU DaemonSet reported abnormal VRAM usage on node `gpu-02`. The CUDA inspector script showed a tenant process leaking memory. You raised a ticket: infra puts the pod into maintenance, and the engineering team applies a cgroup limit to protect co-tenants.
+
+**16:00 — Compliance update**
+
+* The nightly `python-compliance-automation` job produced `reports/report.json` and uploaded it to the secure auditor bucket. The audit manager now has fresh evidence for SOC 2 controls — no manual evidence emails required.
+
+**End of day**
+
+* You update the SOC playbook documenting a new detection rule (from the PDF scanner) and note the steps for containment and evidence export. Everything is tracked and repeatable.
+
+---
+
+# Practical commands cheat-sheet
+
+Kubernetes:
+
+```bash
+kubectl apply -f k8s/namespace-isolation.yaml
+kubectl apply -f k8s/gpu-workload-deployment.yaml
+python3 tools/k8s_hardening_check.py
+```
+
+GPU checks:
+
+```bash
+pip install nvidia-ml-py3
+python3 cuda-research/cuda-memory-check.py
+```
+
+Compliance automation:
+
+```bash
+pip install -r python-compliance-automation/requirements.txt
+python3 python-compliance-automation/run_checks.py --out reports/report.json
+```
+
+PDF scanner:
+
+```bash
+pip install -r pdf-malware-defense/requirements.txt
+python3 pdf-malware-defense/scanner/pdf_analyze.py /path/to/file.pdf
+```
+
+SIEM parse:
+
+```bash
+python3 siem-log-analysis-toolkit/parsers/ssh_parser.py tests/sample_logs/auth.log > parsed.json
+```
+
+---
+
+# Example systemd unit to run pdf_monitor (concept)
+
+Save as `/etc/systemd/system/pdf-monitor.service` (edit paths):
+
+```ini
+[Unit]
+Description=PDF Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+User=secuser
+WorkingDirectory=/home/secuser/pdf-malware-defense/scanner
+ExecStart=/usr/bin/python3 /home/secuser/pdf-malware-defense/scanner/pdf_monitor.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now pdf-monitor.service
+```
+
+---
+#Responsible-use warning
+
+> **Responsible use:** These tools are for defensive and authorized research only. Run them only in systems you own, in lab environments you control, or where you have explicit written permission. Do not deploy against systems without authorization.
+
+---
+
+# Final checklist — ready to get started
+
+A. **Install**: Git, Python, Docker, kubectl, minikube.
+B. **Clone** the 4 repos to a workspace.
+C. **Run** the simple tests (PDF scan, SSH parser) locally to get outputs.
+D. **Deploy** k8s manifests to minikube and run `k8s_hardening_check.py`.
+E. **Hook** `run_checks.py` into GitHub Actions / schedule a nightly job.
+F. **Integrate** PDF alerts and SIEM events into Splunk/ELK for triage.
